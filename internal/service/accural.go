@@ -5,15 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
-	"math/rand"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
 	models "github.com/idudko/go-musthave-diploma/internal/model"
 	"github.com/idudko/go-musthave-diploma/internal/repository"
 )
@@ -21,160 +19,39 @@ import (
 const (
 	defaultWorkersCount = 5
 	defaultPollInterval = 1 * time.Second
-	maxRetries          = 3
-	retryWaitMin        = 1 * time.Second
-	retryWaitMax        = 30 * time.Second
 )
 
-// Get выполняет HTTP GET запрос с механизмом ретраев
+// Get выполняет HTTP GET запрос с автоматическими ретраями
+// hashicorp/go-retryablehttp обрабатывает сетевые ошибки, 5xx и 429 статусы автоматически
 func (c *RetryableHTTPClient) Get(url string) (*http.Response, error) {
-	var resp *http.Response
-	var err error
-
-	for i := 0; i < c.maxRetries; i++ {
-		if i > 0 {
-			// Вычисляем время ожидания с экспоненциальным откатом и jitter
-			wait := c.calculateWaitTime(i)
-			time.Sleep(wait)
-		}
-
-		resp, err = c.client.Get(url)
-		if err != nil {
-			// Проверяем, является ли ошибка retryable
-			if !IsRetryableError(err) {
-				return nil, err
-			}
-			continue
-		}
-
-		// Проверяем, нужно ли повторить запрос на основе статуса
-		if shouldRetry(resp) {
-			resp.Body.Close()
-			continue
-		}
-
-		// Если всё хорошо, возвращаем ответ
-		return resp, nil
+	// hashicorp/go-retryablehttp автоматически обрабатывает ретраи
+	resp, err := c.client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request accrual system: %w", err)
 	}
-
-	// Если все попытки завершились неудачно
-	if resp != nil {
-		resp.Body.Close()
-	}
-	return nil, fmt.Errorf("after %d retries, last error: %v", c.maxRetries, err)
+	return resp, nil
 }
 
-// calculateWaitTime вычисляет время ожидания с экспоненциальным откатом и jitter
-func (c *RetryableHTTPClient) calculateWaitTime(attempt int) time.Duration {
-	// Экспоненциальный откат: base * 2^attempt
-	exp := float64(attempt)
-	waitMin := float64(c.retryWaitMin)
-	waitMax := float64(c.retryWaitMax)
-
-	// Добавляем случайную составляющую (jitter) для предотвращения thundering herd
-	random := rand.Float64() * 0.3 // 30% разброс
-
-	// Вычисляем время ожидания
-	waitTime := math.Min(waitMin*math.Exp(exp)+random, waitMax)
-
-	return time.Duration(waitTime) * time.Second
-}
-
-// isRetryableError проверяет, является ли ошибка retryable
-func IsRetryableError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// Преобразуем ошибку в строку для проверки
-	errStr := err.Error()
-
-	// Проверяем на сетевые ошибки
-	if strings.Contains(errStr, "connection refused") ||
-		strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "no such host") ||
-		strings.Contains(errStr, "network is unreachable") ||
-		strings.Contains(errStr, "connection reset") {
-		return true
-	}
-
-	// Проверяем на ошибки временной недоступности
-	if strings.Contains(errStr, "temporary failure") ||
-		strings.Contains(errStr, "temporary error") {
-		return true
-	}
-
-	// Проверяем на ошибки URL
-	if urlErr, ok := err.(*url.Error); ok {
-		// Timeout ошибки retryable
-		if urlErr.Timeout() {
-			return true
-		}
-	}
-
-	return false
-}
-
-// shouldRetry определяет, нужно ли повторить запрос на основе статуса ответа
-func shouldRetry(resp *http.Response) bool {
-	if resp == nil {
-		return false
-	}
-
-	// Повторяем при ошибках сервера 5xx, кроме 501 (Not Implemented)
-	statusCode := resp.StatusCode
-	if statusCode >= 500 && statusCode != 501 {
-		return true
-	}
-
-	// Также повторяем при ошибке 429 (Too Many Requests)
-	if statusCode == http.StatusTooManyRequests {
-		return true
-	}
-
-	return false
-}
-
-// IsRetryableError проверяет, является ли ошибка retryable
-
-// RetryableHTTPClient - обертка над http-клиентом с механизмом ретраев
+// RetryableHTTPClient - обертка над hashicorp/go-retryablehttp
+// Предоставляет надежный HTTP клиент с автоматическими ретраями для запросов к accrual системе
 type RetryableHTTPClient struct {
-	client       *http.Client
-	maxRetries   int
-	retryWaitMin time.Duration
-	retryWaitMax time.Duration
+	client *retryablehttp.Client
 }
 
 // NewRetryableHTTPClient создает новый экземпляр клиента с ретраями
 func NewRetryableHTTPClient() *RetryableHTTPClient {
+	// Создаем клиент с настройками по умолчанию
+	retryClient := retryablehttp.NewClient()
+
+	// Настройки ретраев
+	retryClient.RetryMax = 3 // Максимум 3 попытки
+	retryClient.RetryWaitMin = 1 * time.Second
+	retryClient.RetryWaitMax = 30 * time.Second
+	retryClient.Logger = nil // Отключаем логирование в стандартный вывод
+
 	return &RetryableHTTPClient{
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		maxRetries:   maxRetries,
-		retryWaitMin: retryWaitMin,
-		retryWaitMax: retryWaitMax,
+		client: retryClient,
 	}
-}
-
-// Объявляем функцию ShouldRetry на уровне пакета для использования в других частях кода
-func ShouldRetry(resp *http.Response) bool {
-	if resp == nil {
-		return false
-	}
-
-	// Повторяем при ошибках сервера 5xx, кроме 501 (Not Implemented)
-	statusCode := resp.StatusCode
-	if statusCode >= 500 && statusCode != 501 {
-		return true
-	}
-
-	// Также повторяем при ошибке 429 (Too Many Requests)
-	if statusCode == http.StatusTooManyRequests {
-		return true
-	}
-
-	return false
 }
 
 type AccrualService struct {
@@ -423,6 +300,7 @@ func (s *AccrualService) getOrderStatus(orderNumber string) (string, *float64, e
 	return status, nil, err
 }
 
+// Get выполняет HTTP GET запрос с механизмом ретраев
 func (s *AccrualService) getOrderStatusWithRateLimit(orderNumber string) (string, *float64, time.Duration, error) {
 	url := fmt.Sprintf("%s/api/orders/%s", s.accrualSystem, orderNumber)
 
@@ -454,12 +332,6 @@ func (s *AccrualService) getOrderStatusWithRateLimit(orderNumber string) (string
 		}
 
 		return "", nil, sleepDuration, fmt.Errorf("rate limit exceeded")
-	}
-
-	// Проверяем, нужно ли повторить запрос на основе статуса
-	if shouldRetry(resp) {
-		// Для ошибок 5xx возвращаем специальную ошибку, которая будет обработана в worker
-		return "", nil, 0, fmt.Errorf("retryable error: status %d", resp.StatusCode)
 	}
 
 	if resp.StatusCode != http.StatusOK {

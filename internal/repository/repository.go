@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
-	"math/rand"
 	"strings"
 	"time"
 
@@ -16,173 +14,17 @@ import (
 	models "github.com/idudko/go-musthave-diploma/internal/model"
 )
 
-/*
-// Пример использования библиотеки github.com/avast/retry-go для ретраев:
-import "github.com/avast/retry-go/v4"
-
-var dbRetryOpts = []retry.Option{
-	retry.Attempts(5),                       // Максимум 5 попыток
-	retry.Delay(100 * time.Millisecond),     // Начальная задержка 100мс
-	retry.MaxDelay(5 * time.Second),         // Максимальная задержка 5с
-	retry.MaxJitter(500 * time.Millisecond), // Максимальный jitter 500мс
-	retry.LastErrorOnly(true),               // Возвращать только последнюю ошибку
-	retry.RetryIf(func(err error) bool {
-		return isDBErrorRetryable(err)
-	}),
-}
-
-// Пример использования:
-func (r *Repository) QueryRowWithRetry(ctx context.Context, query string, args ...interface{}) pgx.Row {
-	var row pgx.Row
-	err := retry.Do(func() error {
-		row = r.pool.QueryRow(ctx, query, args...)
-		return nil // Для QueryRow ошибка проверяется при Scan
-	}, dbRetryOpts...)
-	return row
-}
-*/
-
-// Параметры ретраев для базы данных
-
-// Параметры ретраев для базы данных
-const (
-	dbMaxRetries   = 5
-	dbRetryWaitMin = 100 * time.Millisecond
-	dbRetryWaitMax = 5 * time.Second
-)
-
-// Repository - обертка над pgxpool.Pool с механизмом ретраев
+// Repository - обертка над pgxpool.Pool
 type Repository struct {
-	pool         *pgxpool.Pool
-	maxRetries   int
-	retryWaitMin time.Duration
-	retryWaitMax time.Duration
+	pool *pgxpool.Pool
 }
 
-// isDBErrorRetryable проверяет, является ли ошибка БД retryable
-func isDBErrorRetryable(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		// Ошибки подключения
-		switch pgErr.Code {
-		case "08000", "08001", "08003", "08004", "08006", "08007", // connection exceptions
-			"57P01", "57P02", "57P03", // administrator shutdown
-			"53300", "53100", "53200": // idle session timeout
-			return true
-		}
-
-		// Конкурентные транзакции
-		switch pgErr.Code {
-		case "40001": // serialization failure
-		case "40P01": // deadlock detected
-			return true
-		}
-	}
-
-	// Общие сетевые ошибки
-	if strings.Contains(err.Error(), "connection timeout") ||
-		strings.Contains(err.Error(), "connection refused") ||
-		strings.Contains(err.Error(), "no such host") ||
-		strings.Contains(err.Error(), "network is unreachable") ||
-		strings.Contains(err.Error(), "connection reset") {
-		return true
-	}
-
-	// Ошибки временной недоступности
-	if strings.Contains(err.Error(), "the database system is starting up") ||
-		strings.Contains(err.Error(), "terminating connection") ||
-		strings.Contains(err.Error(), "could not connect to server") {
-		return true
-	}
-
-	// Конкурентные транзакции
-	if strings.Contains(err.Error(), "could not serialize access") ||
-		strings.Contains(err.Error(), "deadlock detected") {
-		return true
-	}
-
-	return false
-}
-
-// calculateDBWaitTime вычисляет время ожидания с экспоненциальным откатом и jitter для БД
-func (r *Repository) calculateDBWaitTime(attempt int) time.Duration {
-	// Экспоненциальный откат: base * 2^attempt
-	exp := float64(attempt)
-	waitMin := float64(r.retryWaitMin)
-	waitMax := float64(r.retryWaitMax)
-
-	// Добавляем случайную составляющую (jitter) для предотвращения thundering herd
-	random := rand.Float64() * 0.2 // 20% разброс для БД
-
-	// Вычисляем время ожидания
-	waitTime := math.Min(waitMin*math.Exp(exp)+random, waitMax)
-
-	return time.Duration(waitTime) * time.Second
-}
-
-// QueryRowWithRetry выполняет запрос с ожиданием одной строки и механизмом ретраев
-func (r *Repository) QueryRowWithRetry(ctx context.Context, query string, args ...interface{}) pgx.Row {
-	for i := 0; i < r.maxRetries; i++ {
-		if i > 0 {
-			// Вычисляем время ожидания с экспоненциальным откатом и jitter
-			wait := r.calculateDBWaitTime(i)
-
-			select {
-			case <-time.After(wait):
-				// Продолжаем выполнение
-			case <-ctx.Done():
-				// Контекст был отменен
-				return r.pool.QueryRow(ctx, query, args...)
-			}
-		}
-
-		row := r.pool.QueryRow(ctx, query, args...)
-		// Для QueryRow мы не можем сразу проверить ошибку, так как она возникает при Scan
-		// Проверку ошибок будем делать в вызывающем коде
-		return row
-	}
-
-	// Если все попытки завершились неудачно, возвращаем последнюю попытку
+func (r *Repository) QueryRowWithRetry(ctx context.Context, query string, args ...any) pgx.Row {
 	return r.pool.QueryRow(ctx, query, args...)
 }
 
-// ExecWithRetry выполняет запрос без возврата данных с механизмом ретраев
-func (r *Repository) ExecWithRetry(ctx context.Context, query string, args ...interface{}) (pgconn.CommandTag, error) {
-	var lastErr error
-
-	for i := 0; i < r.maxRetries; i++ {
-		if i > 0 {
-			// Вычисляем время ожидания с экспоненциальным откатом и jitter
-			wait := r.calculateDBWaitTime(i)
-
-			select {
-			case <-time.After(wait):
-				// Продолжаем выполнение
-			case <-ctx.Done():
-				// Контекст был отменен
-				return pgconn.NewCommandTag(""), ctx.Err()
-			}
-		}
-
-		commandTag, err := r.pool.Exec(ctx, query, args...)
-		if err == nil {
-			return commandTag, nil
-		}
-
-		// Сохраняем последнюю ошибку
-		lastErr = err
-
-		// Если ошибка не retryable, возвращаем её сразу
-		if !isDBErrorRetryable(err) {
-			return pgconn.NewCommandTag(""), err
-		}
-	}
-
-	return pgconn.NewCommandTag(""), fmt.Errorf("after %d retries, last error: %w", r.maxRetries, lastErr)
+func (r *Repository) ExecWithRetry(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	return r.pool.Exec(ctx, query, args...)
 }
 
 func (r *Repository) CreateUser(ctx context.Context, login, passwordHash string) (int64, error) {
@@ -383,4 +225,46 @@ func (r *Repository) UpdateOrderStatus(ctx context.Context, number string, statu
 		}
 	}
 	return nil
+}
+
+func (r *Repository) WithRetry(ctx context.Context, fn func() error) error {
+	const maxRetries = 3
+	const initialDelay = 100 * time.Millisecond
+
+	var lastErr error
+
+	for i := range maxRetries {
+		if i > 0 {
+			delay := initialDelay * time.Duration(1<<uint(i-1))
+			delay = min(delay, time.Second)
+
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+
+		err := fn()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+
+		if strings.Contains(err.Error(), "could not serialize access") ||
+			strings.Contains(err.Error(), "deadlock detected") {
+			continue
+		}
+
+		return err
+	}
+
+	return fmt.Errorf("after %d transaction retries, last error: %w", maxRetries, lastErr)
+}
+
+func NewRepository(pool *pgxpool.Pool) *Repository {
+	return &Repository{
+		pool: pool,
+	}
 }
