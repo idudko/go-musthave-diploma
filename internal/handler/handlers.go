@@ -29,7 +29,7 @@ func NewHandler(authSvc *intservice.AuthService, orderSvc *intservice.OrderServi
 
 func (h *Handler) RegisterUserHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -39,12 +39,12 @@ func (h *Handler) RegisterUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
 	if req.Login == "" || req.Password == "" {
-		http.Error(w, "Login and password are required", http.StatusBadRequest)
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
@@ -55,7 +55,7 @@ func (h *Handler) RegisterUserHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.logger.Error().Err(err).Msg("Failed to register user")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
@@ -76,7 +76,7 @@ func (h *Handler) RegisterUserHandler(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) LoginUserHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -86,23 +86,23 @@ func (h *Handler) LoginUserHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
 	if req.Login == "" || req.Password == "" {
-		http.Error(w, "Login and password are required", http.StatusBadRequest)
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
 	user, token, err := h.authSvc.LoginUser(r.Context(), req.Login, req.Password)
 	if err != nil {
 		if err.Error() == "user not found" || err.Error() == "invalid password" {
-			http.Error(w, "Invalid login or password", http.StatusUnauthorized)
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 			return
 		}
 		h.logger.Error().Err(err).Msg("Failed to login user")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
@@ -123,33 +123,33 @@ func (h *Handler) LoginUserHandler(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) UploadOrderHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
 
 	// Проверяем аутентификацию пользователя
 	userID, ok := middleware.GetUserIDFromContext(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
 
 	// Читаем номер заказа из тела запроса
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
 	orderNumber := string(body)
 	if orderNumber == "" {
-		http.Error(w, "Order number is required", http.StatusBadRequest)
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
 	// Проверяем номер заказа по алгоритму Луна
 	if !intmodel.ValidateLuhn(orderNumber) {
-		http.Error(w, "Invalid order number format", http.StatusUnprocessableEntity)
+		http.Error(w, http.StatusText(http.StatusUnprocessableEntity), http.StatusUnprocessableEntity)
 		return
 	}
 
@@ -157,7 +157,7 @@ func (h *Handler) UploadOrderHandler(w http.ResponseWriter, r *http.Request) {
 	order, err := h.orderSvc.GetOrderByNumber(r.Context(), orderNumber)
 	if err != nil {
 		h.logger.Error().Err(err).Msg("Failed to get order")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
@@ -166,7 +166,7 @@ func (h *Handler) UploadOrderHandler(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			return
 		} else {
-			http.Error(w, "Order already uploaded by another user", http.StatusConflict)
+			http.Error(w, http.StatusText(http.StatusConflict), http.StatusConflict)
 			return
 		}
 	}
@@ -174,7 +174,7 @@ func (h *Handler) UploadOrderHandler(w http.ResponseWriter, r *http.Request) {
 	// Создаем заказ
 	if err := h.orderSvc.CreateOrder(r.Context(), orderNumber, userID); err != nil {
 		h.logger.Error().Err(err).Msg("Failed to create order")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
@@ -183,14 +183,14 @@ func (h *Handler) UploadOrderHandler(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) GetOrdersHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
 
 	// Проверяем аутентификацию пользователя
 	userID, ok := middleware.GetUserIDFromContext(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
 
@@ -198,7 +198,7 @@ func (h *Handler) GetOrdersHandler(w http.ResponseWriter, r *http.Request) {
 	orders, err := h.orderSvc.GetOrdersByUserID(r.Context(), userID)
 	if err != nil {
 		h.logger.Error().Err(err).Msg("Failed to get orders")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
@@ -215,14 +215,14 @@ func (h *Handler) GetOrdersHandler(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) GetBalanceHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
 
 	// Проверяем аутентификацию пользователя
 	userID, ok := middleware.GetUserIDFromContext(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
 
@@ -230,7 +230,7 @@ func (h *Handler) GetBalanceHandler(w http.ResponseWriter, r *http.Request) {
 	balance, err := h.orderSvc.GetBalanceByUserID(r.Context(), userID)
 	if err != nil {
 		h.logger.Error().Err(err).Msg("Failed to get balance")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
@@ -241,14 +241,14 @@ func (h *Handler) GetBalanceHandler(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) CreateWithdrawalHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
 
 	// Проверяем аутентификацию пользователя
 	userID, ok := middleware.GetUserIDFromContext(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
 
@@ -258,18 +258,18 @@ func (h *Handler) CreateWithdrawalHandler(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
 	if req.Order == "" || req.Sum <= 0 {
-		http.Error(w, "Invalid order or sum", http.StatusBadRequest)
+		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
 		return
 	}
 
 	// Проверяем номер заказа по алгоритму Луна
 	if !intmodel.ValidateLuhn(req.Order) {
-		http.Error(w, "Invalid order number format", http.StatusUnprocessableEntity)
+		http.Error(w, http.StatusText(http.StatusUnprocessableEntity), http.StatusUnprocessableEntity)
 		return
 	}
 
@@ -281,7 +281,7 @@ func (h *Handler) CreateWithdrawalHandler(w http.ResponseWriter, r *http.Request
 			return
 		}
 		h.logger.Error().Err(err).Msg("Failed to create withdrawal")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
@@ -290,14 +290,14 @@ func (h *Handler) CreateWithdrawalHandler(w http.ResponseWriter, r *http.Request
 
 func (h *Handler) GetWithdrawalsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 		return
 	}
 
 	// Проверяем аутентификацию пользователя
 	userID, ok := middleware.GetUserIDFromContext(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 		return
 	}
 
@@ -305,7 +305,7 @@ func (h *Handler) GetWithdrawalsHandler(w http.ResponseWriter, r *http.Request) 
 	withdrawals, err := h.orderSvc.GetWithdrawalsByUserID(r.Context(), userID)
 	if err != nil {
 		h.logger.Error().Err(err).Msg("Failed to get withdrawals")
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 

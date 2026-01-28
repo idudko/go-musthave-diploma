@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	models "github.com/idudko/go-musthave-diploma/internal/model"
@@ -82,17 +81,9 @@ func (s *OrderService) CreateWithdrawal(ctx context.Context, order string, sum f
 		return fmt.Errorf("invalid order number format")
 	}
 
-	// Проверяем, достаточно ли средств
-	balance, err := s.repo.GetBalanceByUserID(ctx, userID)
-	if err != nil {
-		return fmt.Errorf("failed to get balance: %w", err)
-	}
-
-	if balance.Current < sum {
-		return errors.New("insufficient funds")
-	}
-
 	// Создаем списание
+	// Проверка баланса и списание выполняются в одной транзакции в репозитории
+	// для предотвращения race condition и обеспечения консистентности данных
 	if err := s.repo.CreateWithdrawal(ctx, order, sum, userID); err != nil {
 		return fmt.Errorf("failed to create withdrawal: %w", err)
 	}

@@ -9,8 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/idudko/go-musthave-diploma/internal/config"
 	inthandler "github.com/idudko/go-musthave-diploma/internal/handler"
 	"github.com/idudko/go-musthave-diploma/internal/repository"
@@ -30,17 +28,12 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to load config")
 	}
 
-	// Подключаемся к базе данных
-	pool, err := pgxpool.New(context.Background(), cfg.DatabaseURI)
+	// Подключаемся к базе данных и выполняем миграции
+	pool, err := repository.ConnectWithMigrations(cfg.DatabaseURI)
 	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to connect to database")
+		logger.Fatal().Err(err).Msg("Failed to connect to database and run migrations")
 	}
 	defer pool.Close()
-
-	// Выполняем миграции
-	if err := repository.RunMigrations(cfg.DatabaseURI); err != nil {
-		logger.Fatal().Err(err).Msg("Failed to run migrations")
-	}
 
 	// Создаем репозиторий
 	repo := repository.NewRepository(pool)
@@ -86,10 +79,10 @@ func main() {
 		}
 	}()
 
-	// Настраиваем graceful shutdown
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	// Настраиваем graceful shutdown с использованием контекста
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	<-ctx.Done()
 	logger.Info().Msg("Shutting down server...")
 
 	// Даем время на завершение текущих запросов

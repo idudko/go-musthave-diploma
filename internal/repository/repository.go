@@ -105,11 +105,24 @@ func (r *Repository) GetBalanceByUserID(ctx context.Context, userID int64) (*mod
 }
 
 func (r *Repository) CreateWithdrawal(ctx context.Context, order string, sum float64, userID int64) error {
-	// Проверяем, достаточно ли средств
+	// Используем транзакцию с уровнем изоляции REPEATABLE READ для предотвращения гонки состояний
+	// и явную блокировку SELECT FOR UPDATE для блокировки строк пользователя от изменений
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		// В случае ошибки откатываем транзакцию
+		if err != nil {
+			tx.Rollback(ctx)
+		}
+	}()
+
+	// Проверяем, достаточно ли средств внутри транзакции с блокировкой
 	var balance float64
-	err := r.db.QueryRow(ctx,
-		"SELECT COALESCE(SUM(accrual), 0) - COALESCE((SELECT SUM(sum) FROM withdrawals WHERE user_id = $1), 0) "+
-			"FROM (SELECT COALESCE(SUM(accrual), 0) as accrual FROM orders WHERE user_id = $1 AND status = 'PROCESSED') as t",
+	err = tx.QueryRow(ctx,
+		"SELECT COALESCE(SUM(accrual), 0) - COALESCE((SELECT SUM(sum) FROM withdrawals WHERE user_id = $1 FOR UPDATE), 0) "+
+			"FROM (SELECT COALESCE(SUM(accrual), 0) as accrual FROM orders WHERE user_id = $1 AND status = 'PROCESSED' FOR UPDATE) as t",
 		userID).Scan(&balance)
 	if err != nil {
 		return fmt.Errorf("failed to get balance: %w", err)
@@ -119,12 +132,18 @@ func (r *Repository) CreateWithdrawal(ctx context.Context, order string, sum flo
 		return fmt.Errorf("insufficient funds")
 	}
 
-	// Создаем списание
-	_, err = r.db.Exec(ctx,
+	// Создаем списание внутри транзакции
+	_, err = tx.Exec(ctx,
 		"INSERT INTO withdrawals (order_number, sum, user_id, processed_at) VALUES ($1, $2, $3, NOW())",
 		order, sum, userID)
 	if err != nil {
 		return fmt.Errorf("failed to create withdrawal: %w", err)
+	}
+
+	// Подтверждаем транзакцию
+	err = tx.Commit(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil
