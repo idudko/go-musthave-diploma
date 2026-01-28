@@ -105,9 +105,8 @@ func (r *Repository) GetBalanceByUserID(ctx context.Context, userID int64) (*mod
 }
 
 func (r *Repository) CreateWithdrawal(ctx context.Context, order string, sum float64, userID int64) error {
-	// Используем транзакцию с уровнем изоляции REPEATABLE READ для предотвращения гонки состояний
-	// и явную блокировку SELECT FOR UPDATE для блокировки строк пользователя от изменений
-	tx, err := r.db.Begin(ctx)
+	// Используем транзакцию с уровнем изоляции SERIALIZABLE для предотвращения гонки состояний
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -118,21 +117,8 @@ func (r *Repository) CreateWithdrawal(ctx context.Context, order string, sum flo
 		}
 	}()
 
-	// Проверяем, достаточно ли средств внутри транзакции с блокировкой
-	var balance float64
-	err = tx.QueryRow(ctx,
-		"SELECT COALESCE(SUM(accrual), 0) - COALESCE((SELECT SUM(sum) FROM withdrawals WHERE user_id = $1 FOR UPDATE), 0) "+
-			"FROM (SELECT COALESCE(SUM(accrual), 0) as accrual FROM orders WHERE user_id = $1 AND status = 'PROCESSED' FOR UPDATE) as t",
-		userID).Scan(&balance)
-	if err != nil {
-		return fmt.Errorf("failed to get balance: %w", err)
-	}
-
-	if balance < sum {
-		return fmt.Errorf("insufficient funds")
-	}
-
-	// Создаем списание внутри транзакции
+	// Используем подход "сначала создай списание, потом проверь баланс"
+	// Это более надежно, так как предотвращает гонку состояний
 	_, err = tx.Exec(ctx,
 		"INSERT INTO withdrawals (order_number, sum, user_id, processed_at) VALUES ($1, $2, $3, NOW())",
 		order, sum, userID)
@@ -140,7 +126,22 @@ func (r *Repository) CreateWithdrawal(ctx context.Context, order string, sum flo
 		return fmt.Errorf("failed to create withdrawal: %w", err)
 	}
 
-	// Подтверждаем транзакцию
+	// Теперь проверим, не стал ли баланс отрицательным после списания
+	var balance float64
+	err = tx.QueryRow(ctx,
+		"SELECT COALESCE(SUM(accrual), 0) - COALESCE((SELECT COALESCE(SUM(sum), 0) FROM withdrawals WHERE user_id = $1), 0) "+
+			"FROM (SELECT COALESCE(SUM(accrual), 0) as accrual FROM orders WHERE user_id = $1 AND status = 'PROCESSED') as t",
+		userID).Scan(&balance)
+	if err != nil {
+		return fmt.Errorf("failed to check balance after withdrawal: %w", err)
+	}
+
+	// Если баланс отрицательный, откатываем транзакцию и возвращаем ошибку
+	if balance < 0 {
+		return fmt.Errorf("insufficient funds")
+	}
+
+	// Подтверждаем транзакцию только если баланс остался неотрицательным
 	err = tx.Commit(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
@@ -167,8 +168,30 @@ func (r *Repository) GetWithdrawalsByUserID(ctx context.Context, userID int64) (
 		}
 		withdrawals = append(withdrawals, withdrawal)
 	}
-
 	return withdrawals, nil
+}
+
+// GetOrdersByStatus возвращает заказы с указанными статусами
+func (r *Repository) GetOrdersByStatus(ctx context.Context, statuses []string) ([]models.Order, error) {
+	rows, err := r.db.Query(ctx,
+		"SELECT id, number, user_id, status, accrual, uploaded_at FROM orders WHERE status = ANY($1)",
+		statuses)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get orders by status: %w", err)
+	}
+	defer rows.Close()
+
+	var orders []models.Order
+	for rows.Next() {
+		var order models.Order
+		err := rows.Scan(&order.ID, &order.Number, &order.UserID, &order.Status, &order.Accrual, &order.UploadedAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan order: %w", err)
+		}
+		orders = append(orders, order)
+	}
+
+	return orders, nil
 }
 
 func (r *Repository) UpdateOrderStatus(ctx context.Context, number string, status string, accrual *float64) error {

@@ -10,12 +10,14 @@ import (
 )
 
 type OrderService struct {
+	ctx        context.Context
 	repo       *repository.Repository
 	accrualSvc *AccrualService
 }
 
-func NewOrderService(repo *repository.Repository, accrualSvc *AccrualService) *OrderService {
+func NewOrderService(ctx context.Context, repo *repository.Repository, accrualSvc *AccrualService) *OrderService {
 	return &OrderService{
+		ctx:        ctx,
 		repo:       repo,
 		accrualSvc: accrualSvc,
 	}
@@ -45,9 +47,14 @@ func (s *OrderService) CreateOrder(ctx context.Context, number string, userID in
 	}
 
 	// Асинхронно отправляем заказ на обработку в систему начисления баллов
-	go s.accrualSvc.ProcessOrder(number)
+	s.ProcessOrderAsync(number)
 
 	return nil
+}
+
+// ProcessOrderAsync добавляет заказ в очередь обработки WorkerPool
+func (s *OrderService) ProcessOrderAsync(number string) {
+	s.accrualSvc.ProcessOrder(s.ctx, number)
 }
 
 func (s *OrderService) GetOrdersByUserID(ctx context.Context, userID int64) ([]models.Order, error) {

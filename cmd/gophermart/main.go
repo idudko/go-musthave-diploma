@@ -29,11 +29,15 @@ func main() {
 	}
 
 	// Подключаемся к базе данных и выполняем миграции
-	pool, err := repository.ConnectWithMigrations(cfg.DatabaseURI)
+	pool, err := repository.ConnectWithMigrations(cfg.DatabaseURI, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to connect to database and run migrations")
 	}
 	defer pool.Close()
+
+	// Создаем контекст для graceful shutdown
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Создаем репозиторий
 	repo := repository.NewRepository(pool)
@@ -41,7 +45,10 @@ func main() {
 	// Создаем сервисы
 	authSvc := intservice.NewAuthService(repo)
 	accrualSvc := intservice.NewAccrualService(repo, cfg.AccrualSystemAddress)
-	orderSvc := intservice.NewOrderService(repo, accrualSvc)
+	orderSvc := intservice.NewOrderService(ctx, repo, accrualSvc)
+
+	// Запускаем обработку заказов через WorkerPool
+	accrualSvc.Start()
 
 	// Создаем обработчики
 	h := inthandler.NewHandler(authSvc, orderSvc, accrualSvc, &logger)
@@ -79,11 +86,12 @@ func main() {
 		}
 	}()
 
-	// Настраиваем graceful shutdown с использованием контекста
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	// Настраиваем graceful shutdown
 	<-ctx.Done()
 	logger.Info().Msg("Shutting down server...")
+
+	// Останавливаем обработку заказов
+	accrualSvc.Stop()
 
 	// Даем время на завершение текущих запросов
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
